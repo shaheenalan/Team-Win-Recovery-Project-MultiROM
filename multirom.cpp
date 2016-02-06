@@ -312,13 +312,16 @@ bool MultiROM::restorecon(std::string name)
 	bool replaced_contexts = false;
 
 	std::string file_contexts = getRomsPath() + name;
+	std::string seapp_contexts = file_contexts + "/boot/seapp_contexts";
 	file_contexts += "/boot/file_contexts";
 
 	if(access(file_contexts.c_str(), R_OK) >= 0)
 	{
 		gui_print("Using ROM's file_contexts\n");
 		rename("/file_contexts", "/file_contexts.orig");
+		rename("/seapp_contexts", "/seapp_contexts.orig");
 		system_args("cp -a \"%s\" /file_contexts", file_contexts.c_str());
+		system_args("cp -a \"%s\" /seapp_contexts", seapp_contexts.c_str());
 		replaced_contexts = true;
 	}
 
@@ -346,8 +349,10 @@ bool MultiROM::restorecon(std::string name)
 	restoreMounts();
 	res = true;
 exit:
-	if(replaced_contexts)
+	if(replaced_contexts) {
 		rename("/file_contexts.orig", "/file_contexts");
+		rename("/seapp_contexts.orig", "/seapp_contexts");
+	}
 	return res;
 }
 
@@ -1537,6 +1542,11 @@ bool MultiROM::createDirs(std::string name, int type)
 				gui_print("Failed to create android folders!\n");
 				return false;
 			}
+			system_args(
+				"chcon u:object_r:system_file:s0 \"%s/system\";"
+				"chcon u:object_r:system_data_file:s0 \"%s/data\";"
+				"chcon u:object_r:cache_file:s0 \"%s/cache\";",
+				base.c_str(), base.c_str(), base.c_str());
 			break;
 		case ROM_UTOUCH_INTERNAL:
 		case ROM_UTOUCH_USB_DIR:
@@ -2253,6 +2263,15 @@ bool MultiROM::ubuntuTouchProcessBoot(const std::string& root, const char *init_
 		gui_print("Failed to unpack boot img!\n");
 		goto fail_inject;
 	}
+	if (libbootimg_dump_dtb(&img, "/tmp/boot/dtb.img") < 0)
+	{
+		gui_print("Didn't find dtb, ignoring\n");
+	}
+	else
+	{
+		gui_print("Found dtb\n");
+		system_args("cp /tmp/boot/dtb.img %s/dtb.img", root.c_str());
+	}
 
 	// DECOMPRESS RAMDISK
 	gui_print("Decompressing ramdisk...\n");
@@ -2930,6 +2949,35 @@ bool MultiROM::copySecondaryToInternal(const std::string& rom_name)
 			return false;
 
 	return true;
+}
+
+bool MultiROM::duplicateSecondary(const std::string& src, const std::string& dst)
+{
+	gui_print("Copying secondary ROM \"%s\" to \"%s\"\n", src.c_str(), dst.c_str());
+
+	std::string src_dir = getRomsPath() + src;
+	std::string dest_dir = getRomsPath() + dst;
+	if(access(dest_dir.c_str(), F_OK) >= 0)
+	{
+		LOGERR("This ROM name is taken!\n");
+		return false;
+	}
+
+	if(system_args("cp -a \"%s\" \"%s\"", src_dir.c_str(), dest_dir.c_str()) != 0)
+	{
+		LOGERR("Copying failed, see log for more info!\n");
+		goto erase_incomplete;
+	}
+
+	if(!cp_xattrs_recursive(src_dir, dest_dir, DT_DIR))
+		goto erase_incomplete;
+
+	return true;
+
+erase_incomplete:
+	gui_print("Failed, removing incomplete ROM...\n");
+	system_args("rm -rf \"%s\"", dest_dir.c_str());
+	return false;
 }
 
 std::string MultiROM::getRecoveryVersion()
